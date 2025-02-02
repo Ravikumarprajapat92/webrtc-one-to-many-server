@@ -2,97 +2,85 @@ import { WebSocketServer } from 'ws';
 
 const wss = new WebSocketServer({ port: 8080 });
 
-const roomMap = {} // roomName(str):[<ws>(websocket connection)]
-const getParams = params => {
-    const map = {}
-    params.split('&').forEach(item => {
-        const string = item.split('=')
-        map[string[0]] = string[1]
-    })
-    return map
-}
+const roomMap = {}; // roomName(str) -> [WebSocket connections]
 
-const saveWSConnectionAndShareStreams = ws => {
-    const {
-        room
-    } = ws
-    if (!roomMap.hasOwnProperty(room)) {
-        roomMap[room] = []
+const getParams = (url) => {
+    const queryParams = new URLSearchParams(url);
+    return Object.fromEntries(queryParams.entries());
+};
+
+const saveWSConnectionAndShareStreams = (ws) => {
+    const { room, streamName } = ws;
+    
+    if (!roomMap[room]) {
+        roomMap[room] = [];
     }
-    roomMap[room].push(ws)
+    roomMap[room].push(ws);
 
-    const listing = roomMap[room]
-    const streams = listing.map(w => w.streamName)
-    listing.forEach(l => {
-        l.send(JSON.stringify({
-            room,
-            streams
-        }))
-    })
-}
+    // Send updated stream list to all clients except the sender
+    const streams = roomMap[room].map(w => w.streamName);
+    roomMap[room].forEach(client => {
+        if (client !== ws && client.readyState === client.OPEN) {
+            client.send(JSON.stringify({ room, streams }));
+        }
+    });
+};
 
-const clearWSData = ws => {
-    const {
-        room,
-        streamName
-    } = ws
-    const listing = roomMap[room];
-    const streams = listing.map(w => w.streamName)
-    const index = streams.indexOf(streamName)
-    if (index > -1) {
-        roomMap[room].splice(index, 1)
-        streams.splice(index, 1)
-        roomMap[room].forEach(l => {
-            l.send(JSON.stringify({
-                room,
-                streams
-            }))
-        })
+const clearWSData = (ws) => {
+    const { room, streamName } = ws;
+    
+    if (!roomMap[room]) return;
+
+    // Remove WebSocket from room list
+    roomMap[room] = roomMap[room].filter(w => w !== ws);
+    
+    if (roomMap[room].length === 0) {
+        delete roomMap[room]; // Clean up empty rooms
+    } else {
+        // Send updated stream list to remaining clients
+        const streams = roomMap[room].map(w => w.streamName);
+        roomMap[room].forEach(client => {
+            if (client.readyState === client.OPEN) {
+                client.send(JSON.stringify({ room, streams }));
+            }
+        });
     }
-}
+};
 
 wss.on('connection', (ws, req) => {
-    console.log('websocket connection open')
-    const params = getParams(req.url.split('?')[1])
-    console.log(params)
+    console.log('WebSocket connection opened');
 
-    if (!params.room && !params.streamName) {
-        ws.send('The following query parameters are required: room, streamName')
-        ws.close()
+    const params = getParams(req.url.split('?')[1]);
+    console.log(params);
+
+    if (!params.room || !params.streamName) {
+        ws.send(JSON.stringify({ error: 'Missing required query parameters: room, streamName' }));
+        ws.close();
+        return;
     }
 
-    ws.room = params['room']
-    ws.streamName = params['streamName']
-    saveWSConnectionAndShareStreams(ws, params)
+    ws.room = params.room;
+    ws.streamName = params.streamName;
+    saveWSConnectionAndShareStreams(ws);
 
-    ws.on('message', message => {
-        console.log('webSocket message received', message);
-        const listing = roomMap[ws.room].filter(w => w.streamName !== ws.streamName);
-        // let json = message
-        // if (typeof message === 'string') {
-        //     // json = JSON.parse(message)
-        // }
-        listing.forEach(l => {
-            l.send(message)
-        })
-        console.log('Received: ' + message)
-    })
+    ws.on('message', (message) => {
+        console.log(`WebSocket message received: ${message}`);
+
+        const recipients = roomMap[ws.room]?.filter(client => client !== ws);
+
+        recipients.forEach(client => {
+            if (client.readyState === client.OPEN) {
+                client.send(message);
+            }
+        });
+    });
 
     ws.on('close', () => {
-        console.log('websocket connection close')
-        clearWSData(ws)
-    })
-})
+        console.log('WebSocket connection closed');
+        clearWSData(ws);
+    });
 
-
-// wss.on('connection', function connection(ws, req) {
-//     const params = getParams(req.url.split('?')[1])
-//     ws.on('error', console.error);
-
-//     ws.on('message', function message(data) {
-//         console.log('received: %s', data);
-//         ws.send(data);
-//     });
-
-//     //   ws.send();
-// });
+    ws.on('error', (err) => {
+        console.error('WebSocket error:', err);
+    });
+});
